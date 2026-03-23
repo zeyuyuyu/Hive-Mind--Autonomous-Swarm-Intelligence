@@ -1,141 +1,61 @@
-"""Core implementation of Hive Mind swarm intelligence."""
-
-from typing import List, Dict, Callable, Optional
-import numpy as np
-from dataclasses import dataclass
-
-@dataclass
-class SwarmAgent:
-    """Individual agent in the swarm."""
-    id: int
-    position: np.ndarray
-    velocity: np.ndarray
-    best_position: np.ndarray
-    best_score: float
+import random
 
 class HiveMind:
-    """Manages collective swarm intelligence and behavior."""
-    
-    def __init__(self, 
-                 num_agents: int,
-                 dimensions: int,
-                 objective_fn: Callable,
-                 bounds: tuple,
-                 topology: str = 'dynamic'):
-        self.num_agents = num_agents
-        self.dimensions = dimensions
-        self.objective_fn = objective_fn
-        self.bounds = bounds
-        self.topology = topology
-        
-        # Initialize swarm
-        self.agents: List[SwarmAgent] = []
-        self.global_best_position = None
-        self.global_best_score = float('inf')
-        self.initialize_swarm()
-        
-        # Adaptive parameters
-        self.inertia = 0.9
-        self.cognitive_factor = 2.0
-        self.social_factor = 2.0
-        self.adaptation_rate = 0.01
-    
-    def initialize_swarm(self) -> None:
-        """Initialize swarm agents with random positions and velocities."""
-        for i in range(self.num_agents):
-            position = np.random.uniform(self.bounds[0], self.bounds[1], 
-                                       self.dimensions)
-            velocity = np.zeros(self.dimensions)
-            score = self.objective_fn(position)
-            
-            agent = SwarmAgent(
-                id=i,
-                position=position,
-                velocity=velocity,
-                best_position=position.copy(),
-                best_score=score
-            )
-            
-            self.agents.append(agent)
-            
-            if score < self.global_best_score:
-                self.global_best_score = score
-                self.global_best_position = position.copy()
-    
-    def get_neighborhood(self, agent_id: int) -> List[SwarmAgent]:
-        """Get neighboring agents based on topology."""
-        if self.topology == 'global':
-            return self.agents
-        elif self.topology == 'ring':
-            left = (agent_id - 1) % self.num_agents
-            right = (agent_id + 1) % self.num_agents
-            return [self.agents[left], self.agents[right]]
-        elif self.topology == 'dynamic':
-            # Dynamic topology based on spatial proximity
-            distances = []
-            for other in self.agents:
-                if other.id != agent_id:
-                    dist = np.linalg.norm(self.agents[agent_id].position - 
-                                         other.position)
-                    distances.append((dist, other))
-            distances.sort()
-            return [agent for _, agent in distances[:3]]
-    
-    def adapt_parameters(self) -> None:
-        """Dynamically adapt swarm parameters based on performance."""
-        if self.global_best_score > 0:
-            self.inertia *= (1 - self.adaptation_rate)
-            self.cognitive_factor *= (1 + self.adaptation_rate)
-        else:
-            self.inertia *= (1 + self.adaptation_rate)
-            self.social_factor *= (1 + self.adaptation_rate)
-            
-        # Enforce bounds
-        self.inertia = np.clip(self.inertia, 0.4, 0.9)
-        self.cognitive_factor = np.clip(self.cognitive_factor, 1.5, 2.5)
-        self.social_factor = np.clip(self.social_factor, 1.5, 2.5)
-    
-    def update(self) -> None:
-        """Update swarm positions and velocities for one iteration."""
-        for agent in self.agents:
-            # Get neighborhood best
-            neighborhood = self.get_neighborhood(agent.id)
-            neighborhood_best = min(neighborhood, 
-                                  key=lambda x: x.best_score)
-            
-            # Update velocity
-            cognitive = np.random.random(self.dimensions) * self.cognitive_factor
-            social = np.random.random(self.dimensions) * self.social_factor
-            
-            agent.velocity = (self.inertia * agent.velocity + 
-                            cognitive * (agent.best_position - agent.position) +
-                            social * (neighborhood_best.best_position - 
-                                     agent.position))
-            
-            # Update position
-            agent.position += agent.velocity
-            agent.position = np.clip(agent.position, 
-                                    self.bounds[0], 
-                                    self.bounds[1])
-            
-            # Evaluate new position
-            score = self.objective_fn(agent.position)
-            
-            # Update personal best
-            if score < agent.best_score:
-                agent.best_score = score
-                agent.best_position = agent.position.copy()
-                
-                # Update global best
-                if score < self.global_best_score:
-                    self.global_best_score = score
-                    self.global_best_position = agent.position.copy()
-        
-        # Adapt parameters
-        self.adapt_parameters()
-    
-    def optimize(self, max_iterations: int) -> tuple:
-        """Run swarm optimization for specified iterations."""
-        for _ in range(max_iterations):
-            self.update()
-        return self.global_best_position, self.global_best_score
+    def __init__(self, num_agents, environment):
+        self.agents = [Agent(self, environment) for _ in range(num_agents)]
+        self.environment = environment
+
+    def run(self):
+        while True:
+            for agent in self.agents:
+                agent.sense()
+                agent.decide()
+                agent.act()
+            self.environment.update()
+
+class Agent:
+    def __init__(self, hive_mind, environment):
+        self.hive_mind = hive_mind
+        self.environment = environment
+        self.position = (random.uniform(-10, 10), random.uniform(-10, 10))
+        self.velocity = (random.uniform(-1, 1), random.uniform(-1, 1))
+        self.goal = None
+
+    def sense(self):
+        # Sense nearby agents and environment
+        self.nearby_agents = [agent for agent in self.hive_mind.agents if self.distance(agent) < 5]
+        self.nearby_resources = [resource for resource in self.environment.resources if self.distance(resource) < 2]
+
+    def decide(self):
+        # Coordinate with nearby agents and decide on a goal
+        if not self.goal:
+            self.goal = self.find_nearest_resource()
+            for agent in self.nearby_agents:
+                if agent.goal == self.goal:
+                    self.goal = self.find_alternative_resource()
+                    break
+
+    def act(self):
+        # Move towards the goal
+        dx, dy = self.goal[0] - self.position[0], self.goal[1] - self.position[1]
+        distance = (dx ** 2 + dy ** 2) ** 0.5
+        if distance > 0.1:
+            self.velocity = (self.velocity[0] + dx / distance * 0.1, self.velocity[1] + dy / distance * 0.1)
+            self.position = (self.position[0] + self.velocity[0], self.position[1] + self.velocity[1])
+
+    def distance(self, other):
+        # Calculate the distance to another agent or resource
+        dx, dy = self.position[0] - other.position[0], self.position[1] - other.position[1]
+        return (dx ** 2 + dy ** 2) ** 0.5
+
+    def find_nearest_resource(self):
+        # Find the nearest resource
+        nearest_resource = min(self.environment.resources, key=self.distance)
+        return nearest_resource.position
+
+    def find_alternative_resource(self):
+        # Find an alternative resource that is not being targeted by nearby agents
+        for resource in self.environment.resources:
+            if resource.position != self.goal and all(agent.goal != resource.position for agent in self.nearby_agents):
+                return resource.position
+        return self.find_nearest_resource()
