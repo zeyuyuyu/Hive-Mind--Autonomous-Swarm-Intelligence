@@ -1,133 +1,111 @@
 import numpy as np
-from typing import List, Dict, Callable, Optional
-from dataclasses import dataclass
+from typing import List, Dict, Set, Optional
+import networkx as nx
 
-@dataclass
-class Agent:
-    id: int
-    position: np.ndarray
-    role: str = 'worker'
-    specialization: float = 0.0
-    current_task: Optional[str] = None
+class SwarmAgent:
+    def __init__(self, agent_id: int, position: np.ndarray):
+        self.id = agent_id
+        self.position = position
+        self.velocity = np.zeros_like(position)
+        self.neighbors: Set[int] = set()
+        self.state: Dict = {}
 
-class SwarmIntelligence:
-    def __init__(self, num_agents: int, dimensions: int = 2):
-        self.agents = [
-            Agent(
-                id=i,
-                position=np.random.uniform(-1, 1, dimensions)
-            ) for i in range(num_agents)
-        ]
-        self.tasks: Dict[str, Dict] = {}
-        self.role_behaviors: Dict[str, Callable] = {
-            'worker': self._worker_behavior,
-            'scout': self._scout_behavior,
-            'specialist': self._specialist_behavior
-        }
+class AdaptiveSwarm:
+    def __init__(self, n_agents: int, dimensions: int = 2, communication_range: float = 10.0):
+        self.n_agents = n_agents
+        self.dimensions = dimensions
+        self.communication_range = communication_range
+        self.agents: Dict[int, SwarmAgent] = {}
+        self.topology = nx.Graph()
+        self._initialize_swarm()
     
-    def add_task(self, task_id: str, position: np.ndarray, complexity: float):
-        self.tasks[task_id] = {
-            'position': position,
-            'complexity': complexity,
-            'progress': 0.0,
-            'assigned_agents': []
-        }
-
-    def update(self, dt: float):
-        self._update_roles()
-        self._allocate_tasks()
+    def _initialize_swarm(self):
+        for i in range(self.n_agents):
+            position = np.random.uniform(-50, 50, self.dimensions)
+            self.agents[i] = SwarmAgent(i, position)
+            self.topology.add_node(i)
+    
+    def update_topology(self):
+        """Dynamically update network topology based on agent positions"""
+        # Reset edges
+        self.topology.clear_edges()
         
-        for agent in self.agents:
-            if agent.role in self.role_behaviors:
-                self.role_behaviors[agent.role](agent, dt)
+        # Update neighbor connections based on proximity
+        for i in self.agents:
+            self.agents[i].neighbors.clear()
+            for j in self.agents:
+                if i != j:
+                    distance = np.linalg.norm(
+                        self.agents[i].position - self.agents[j].position
+                    )
+                    if distance <= self.communication_range:
+                        self.agents[i].neighbors.add(j)
+                        self.topology.add_edge(i, j, weight=distance)
 
-    def _update_roles(self):
-        # Dynamic role adaptation based on task demands
-        num_tasks = len(self.tasks)
-        if num_tasks == 0:
-            return
-
-        # Calculate needed distribution
-        desired_scouts = max(2, int(0.1 * len(self.agents)))
-        desired_specialists = int(0.3 * len(self.agents))
-        
-        current_roles = {role: sum(1 for a in self.agents if a.role == role)
-                        for role in self.role_behaviors.keys()}
-
-        # Adjust roles to match desired distribution
-        for agent in self.agents:
-            if current_roles['scout'] < desired_scouts:
-                if agent.role != 'scout':
-                    agent.role = 'scout'
-                    current_roles['scout'] += 1
-                    current_roles[agent.role] -= 1
-            elif current_roles['specialist'] < desired_specialists:
-                if agent.role != 'specialist':
-                    agent.role = 'specialist'
-                    current_roles['specialist'] += 1
-                    current_roles[agent.role] -= 1
-
-    def _allocate_tasks(self):
-        # Clear current assignments
-        for task in self.tasks.values():
-            task['assigned_agents'] = []
-
-        # Assign tasks based on agent specialization and proximity
-        available_agents = [a for a in self.agents if a.current_task is None]
-        
-        for task_id, task in self.tasks.items():
-            if task['progress'] >= 1.0:
-                continue
-                
-            # Find closest suitable agents
-            distances = [np.linalg.norm(a.position - task['position']) 
-                        for a in available_agents]
+    def get_local_centroid(self, agent_id: int) -> np.ndarray:
+        """Calculate centroid of local neighborhood"""
+        if not self.agents[agent_id].neighbors:
+            return self.agents[agent_id].position
             
-            # Assign based on distance and specialization
-            num_needed = int(task['complexity'] * 3)  # Scale with complexity
-            for _ in range(min(num_needed, len(available_agents))):
-                if not distances:
-                    break
-                best_idx = np.argmin(distances)
-                agent = available_agents.pop(best_idx)
-                distances.pop(best_idx)
-                
-                agent.current_task = task_id
-                task['assigned_agents'].append(agent.id)
+        positions = [self.agents[n].position for n in self.agents[agent_id].neighbors]
+        return np.mean(positions, axis=0)
 
-    def _worker_behavior(self, agent: Agent, dt: float):
-        if agent.current_task:
-            task = self.tasks[agent.current_task]
-            # Move toward task
-            direction = task['position'] - agent.position
-            distance = np.linalg.norm(direction)
-            if distance > 0.01:
-                agent.position += direction * dt
-            else:
-                # Contribute to task progress
-                task['progress'] = min(1.0, task['progress'] + 0.1 * dt)
+    def apply_cohesion(self, agent_id: int, factor: float = 0.1) -> np.ndarray:
+        """Force moving agent toward local neighborhood centroid"""
+        centroid = self.get_local_centroid(agent_id)
+        return factor * (centroid - self.agents[agent_id].position)
 
-    def _scout_behavior(self, agent: Agent, dt: float):
-        # Random exploration pattern
-        agent.position += np.random.normal(0, 0.1, size=len(agent.position)) * dt
-        # Keep within bounds
-        agent.position = np.clip(agent.position, -1, 1)
+    def apply_separation(self, agent_id: int, min_distance: float = 5.0, factor: float = 0.2) -> np.ndarray:
+        """Force pushing agents away from too-close neighbors"""
+        separation = np.zeros(self.dimensions)
+        for neighbor_id in self.agents[agent_id].neighbors:
+            diff = self.agents[agent_id].position - self.agents[neighbor_id].position
+            distance = np.linalg.norm(diff)
+            if distance < min_distance:
+                separation += (diff / distance) * (min_distance - distance)
+        return factor * separation
 
-    def _specialist_behavior(self, agent: Agent, dt: float):
-        if agent.current_task:
-            task = self.tasks[agent.current_task]
-            # Specialists are more efficient at task completion
-            direction = task['position'] - agent.position
-            distance = np.linalg.norm(direction)
-            if distance > 0.01:
-                agent.position += direction * 1.5 * dt  # Move faster
-            else:
-                # Contribute more to task progress
-                task['progress'] = min(1.0, task['progress'] + 0.2 * dt)
-                agent.specialization = min(1.0, agent.specialization + 0.05 * dt)
+    def apply_alignment(self, agent_id: int, factor: float = 0.1) -> np.ndarray:
+        """Force aligning agent velocity with neighbors"""
+        if not self.agents[agent_id].neighbors:
+            return np.zeros(self.dimensions)
+            
+        velocities = [self.agents[n].velocity for n in self.agents[agent_id].neighbors]
+        avg_velocity = np.mean(velocities, axis=0)
+        return factor * (avg_velocity - self.agents[agent_id].velocity)
 
-    def get_swarm_state(self) -> Dict:
+    def step(self, dt: float = 0.1):
+        """Advance simulation by one timestep"""
+        self.update_topology()
+        
+        # Calculate new velocities
+        new_velocities = {}
+        for agent_id in self.agents:
+            cohesion = self.apply_cohesion(agent_id)
+            separation = self.apply_separation(agent_id)
+            alignment = self.apply_alignment(agent_id)
+            
+            new_velocity = self.agents[agent_id].velocity + cohesion + separation + alignment
+            # Limit velocity magnitude
+            speed = np.linalg.norm(new_velocity)
+            if speed > 10.0:
+                new_velocity = (new_velocity / speed) * 10.0
+            new_velocities[agent_id] = new_velocity
+        
+        # Update positions and velocities
+        for agent_id in self.agents:
+            self.agents[agent_id].velocity = new_velocities[agent_id]
+            self.agents[agent_id].position += self.agents[agent_id].velocity * dt
+
+    def get_network_metrics(self) -> Dict:
+        """Calculate key network topology metrics"""
         return {
-            'agents': [(a.id, a.position.tolist(), a.role) for a in self.agents],
-            'tasks': self.tasks
+            'avg_degree': np.mean([d for _, d in self.topology.degree()]),
+            'clustering': nx.average_clustering(self.topology),
+            'components': nx.number_connected_components(self.topology),
+            'density': nx.density(self.topology)
         }
+
+    def get_positions(self) -> np.ndarray:
+        """Return array of all agent positions"""
+        return np.array([agent.position for agent in self.agents.values()])
